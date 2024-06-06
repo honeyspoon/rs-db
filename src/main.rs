@@ -13,10 +13,12 @@ enum Statement {
     Insert,
 }
 
-fn prepare_statment(buffer: &String) -> Option<Statement> {
-    match buffer.trim() {
-        "select" => Some(Statement::Select),
-        "insert" => Some(Statement::Insert),
+fn prepare_statment(buffer: &str) -> Option<Statement> {
+    let parts: Vec<&str> = buffer.trim().split(' ').collect();
+
+    match parts.as_slice() {
+        ["insert", rest @ ..] => Some(Statement::Insert),
+        ["select", rest @ ..] => Some(Statement::Select),
         _ => None,
     }
 }
@@ -32,29 +34,39 @@ fn execute_statment(statement: Statement) {
     }
 }
 
+fn parse_command(line: &str) -> bool {
+    match line.trim() {
+        EXIT_COMMAND => return true,
+        HELP_COMMAND => printhelp(),
+        _ => println!("unknown command"),
+    }
+    false
+}
+
+fn parse_line(line: &str) -> bool {
+    match line.chars().next() {
+        Some('.') => return parse_command(line),
+        Some('\n') => println!("nothing"),
+        Some(_) => match prepare_statment(line) {
+            Some(statement) => execute_statment(statement),
+            None => println!("unsupported command"),
+        },
+        None => println!("error"),
+    };
+    false
+}
+
 fn main() -> io::Result<()> {
     println!("~ rsdb");
 
-    let mut exit = false;
-    while !exit {
+    loop {
         print!("> ");
         let mut buffer = String::new();
         let _ = io::stdout().flush();
         io::stdin().read_line(&mut buffer)?;
-
-        match buffer.chars().next() {
-            Some('.') => match buffer.trim() {
-                EXIT_COMMAND => exit = true,
-                HELP_COMMAND => printhelp(),
-                _ => println!("unknown command"),
-            },
-            Some('\n') => println!("nothing"),
-            Some(_) => match prepare_statment(&buffer) {
-                Some(statement) => execute_statment(statement),
-                None => println!("unsupported command"),
-            },
-            None => println!("error"),
-        };
+        if parse_line(&buffer) {
+            break;
+        }
     }
 
     println!("bye");
