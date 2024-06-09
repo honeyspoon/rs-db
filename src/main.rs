@@ -1,25 +1,47 @@
 use log::info;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
-fn print_help() {
-    println!("help");
-}
-
-const EXIT_COMMAND: &str = ".exit";
-const HELP_COMMAND: &str = ".help";
-
-const COLUMN_USERNAME_SIZE: usize = 32;
-const COLUMN_EMAIL_SIZE: usize = 255;
-
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize)]
 struct Row {
     id: i32,
     username: String,
     email: String,
+}
+
+const COLUMN_USERNAME_SIZE: usize = 32;
+const COLUMN_EMAIL_SIZE: usize = 64;
+
+impl Row {
+    fn new(id: i32, username: &str, email: &str) -> Self {
+        Row {
+            id,
+            username: pad_string(username, COLUMN_USERNAME_SIZE),
+            email: pad_string(email, COLUMN_EMAIL_SIZE),
+            // should I pad the strings here or when I (de)serialize them?
+        }
+    }
+}
+
+impl fmt::Debug for Row {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Row")
+            .field("id", &self.id)
+            .field("username", &self.username.trim())
+            .field("email", &self.email.trim())
+            .finish()
+    }
+}
+
+fn pad_string(input: &str, size: usize) -> String {
+    let mut s = String::from(input);
+    s.truncate(size);
+    s.push_str(&" ".repeat(size - s.len()));
+    s
 }
 
 enum Statement {
@@ -29,12 +51,9 @@ enum Statement {
 
 fn parse_insert(words: &[&str]) -> Result<Statement, &'static str> {
     match words {
+        // should new do the validation or should it be done before ?
         [id, username, email] => match id.parse() {
-            Ok(id) => Ok(Statement::Insert(Row {
-                id,
-                username: username.to_string(),
-                email: email.to_string(),
-            })),
+            Ok(id) => Ok(Statement::Insert(Row::new(id, username, email))),
             _ => Err("invalid id. not a number"),
         },
         _ => Err("invalid insert expected 3 args"),
@@ -70,6 +89,13 @@ fn parse_statement(line: String) -> Result<(), &'static str> {
         Err(err) => Err(err),
     }
 }
+
+fn print_help() {
+    println!("help");
+}
+
+const EXIT_COMMAND: &str = ".exit";
+const HELP_COMMAND: &str = ".help";
 
 fn parse_command(line: String) -> Result<(), &'static str> {
     match line.trim() {
