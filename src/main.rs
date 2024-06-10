@@ -26,39 +26,41 @@ impl Table {
         }
     }
 
-    fn get_page_for_row(&self, row_id: u32) -> &Page {
-        let page_id = row_id as usize / TABLE_MAX_PAGES;
-
-        self.pages[page_id].as_ref().unwrap()
-    }
-
-    fn get_page_for_row_mut(&mut self, row_id: u32) -> &mut Page {
-        let page_id = row_id as usize / TABLE_MAX_PAGES;
+    fn ensure_page_exists(&mut self, page_id: usize) {
         let rows_per_page: usize = PAGE_SIZE / self.row_size;
-
         if self.pages[page_id].is_none() {
             let capacity = rows_per_page * self.row_size;
             self.pages[page_id] = Some(vec![0; capacity]);
         }
+    }
 
-        self.pages[page_id].as_mut().unwrap()
+    fn get_page_id(&self, row_id: u32) -> usize {
+        row_id as usize / TABLE_MAX_PAGES
+    }
+
+    fn get_row_offset(&self, row_id: u32) -> usize {
+        (row_id as usize % TABLE_MAX_PAGES) * self.row_size
     }
 
     fn insert_row(&mut self, row: &Row) {
-        let row_offset = (row.id as usize % TABLE_MAX_PAGES) * self.row_size;
+        let row_offset = self.get_row_offset(row.id);
         let row_bytes = bincode::serialize(&row).unwrap();
+        let page_id = self.get_page_id(row.id);
+        self.ensure_page_exists(page_id);
 
-        {
-            let page = self.get_page_for_row_mut(row.id);
-            page[row_offset..row_offset + row_bytes.len()].copy_from_slice(&row_bytes);
-        }
-
+        self.copy_to_page(page_id, row_offset, &row_bytes);
         self.nb_rows += 1;
+    }
+
+    fn copy_to_page(&mut self, page_id: usize, row_offset: usize, row_bytes: &[u8]) {
+        let page = self.pages[page_id].as_mut().unwrap();
+        page[row_offset..row_offset + row_bytes.len()].copy_from_slice(row_bytes);
     }
 
     fn select_row(&self) {
         for row_id in 0..self.nb_rows {
-            let page = self.get_page_for_row(row_id);
+            let page_id = self.get_page_id(row_id);
+            let page = self.pages[page_id].as_ref().unwrap();
             let row_offset = (row_id as usize % TABLE_MAX_PAGES) * self.row_size;
             let slice_end = row_offset + self.row_size;
             let slice = &page[row_offset..slice_end];
