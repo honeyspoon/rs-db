@@ -42,31 +42,50 @@ impl Table {
         (row_id as usize % TABLE_MAX_PAGES) * self.row_size
     }
 
-    fn insert_row(&mut self, row: &Row) {
+    fn insert_row(&mut self, row: &Row) -> Result<(), &'static str> {
         let row_offset = self.get_row_offset(row.id);
-        let row_bytes = bincode::serialize(&row).unwrap();
-        let page_id = self.get_page_id(row.id);
-        self.ensure_page_exists(page_id);
+        match bincode::serialize(&row) {
+            Ok(row_bytes) => {
+                let page_id = self.get_page_id(row.id);
+                self.ensure_page_exists(page_id);
 
-        self.copy_to_page(page_id, row_offset, &row_bytes);
-        self.nb_rows += 1;
-    }
-
-    fn copy_to_page(&mut self, page_id: usize, row_offset: usize, row_bytes: &[u8]) {
-        let page = self.pages[page_id].as_mut().unwrap();
-        page[row_offset..row_offset + row_bytes.len()].copy_from_slice(row_bytes);
-    }
-
-    fn select_row(&self) {
-        for row_id in 0..self.nb_rows {
-            let page_id = self.get_page_id(row_id);
-            let page = self.pages[page_id].as_ref().unwrap();
-            let row_offset = (row_id as usize % TABLE_MAX_PAGES) * self.row_size;
-            let slice_end = row_offset + self.row_size;
-            let slice = &page[row_offset..slice_end];
-            let decoded: Row = bincode::deserialize(slice).unwrap();
-            println!("{:?}", decoded);
+                match self.copy_to_page(page_id, row_offset, &row_bytes) {
+                    Ok(_) => {
+                        self.nb_rows += 1;
+                        Ok(())
+                    }
+                    Err(_) => Err("failed to copy to page"),
+                }
+            }
+            Err(_) => Err("failed to serialize row"),
         }
+    }
+
+    fn copy_to_page(
+        &mut self,
+        page_id: usize,
+        row_offset: usize,
+        row_bytes: &[u8],
+    ) -> Result<(), &'static str> {
+        match self.pages[page_id].as_mut() {
+            Some(page) => {
+                page[row_offset..row_offset + row_bytes.len()].copy_from_slice(row_bytes);
+                Ok(())
+            }
+            None => Err("failed to get page"),
+        }
+    }
+
+    fn select_row(&self) -> Vec<Row> {
+        (0..self.nb_rows)
+            .map(|row_id| {
+                let page_id = self.get_page_id(row_id);
+                let page = self.pages[page_id].as_ref().unwrap();
+                let row_offset = self.get_row_offset(row_id);
+                let slice = &page[row_offset..row_offset + self.row_size];
+                bincode::deserialize(slice).unwrap()
+            })
+            .collect()
     }
 }
 
@@ -143,7 +162,9 @@ fn execute_statment(statement: Statement, table: &mut Table) -> Result<(), &'sta
             Ok(())
         }
         Statement::Select => {
-            table.select_row();
+            for row in table.select_row() {
+                println!("{:?}", row);
+            }
             Ok(())
         }
     }
@@ -226,4 +247,26 @@ fn main() -> rustyline::Result<()> {
     info!("end");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn basic_rows() {
+        let row = Row::new(1, "foo", "bar");
+        assert_eq!(row.id, 1);
+        assert_eq!(row.username, pad_string("foo", COLUMN_USERNAME_SIZE));
+        assert_eq!(row.email, pad_string("bar", COLUMN_EMAIL_SIZE));
+    }
+
+    #[test]
+    fn basic() {
+        let mut table = Table::new();
+        let _ = table.insert_row(&Row::new(1, "foo", "bar"));
+        let _ = table.insert_row(&Row::new(2, "foo", "bar"));
+        let rows = table.select_row();
+        assert_eq!(rows.len(), 2);
+    }
 }
