@@ -91,7 +91,7 @@ impl Table {
 
 type Page = Vec<u8>;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq)]
 struct Row {
     id: u32,
     username: String,
@@ -129,6 +129,7 @@ fn pad_string(input: &str, size: usize) -> String {
     s
 }
 
+#[derive(Debug, PartialEq)]
 enum Statement {
     Select,
     Insert(Row),
@@ -145,8 +146,25 @@ fn parse_insert(words: &[&str]) -> Result<Statement, &'static str> {
     }
 }
 
-fn prepare_statment(buffer: String) -> Result<Statement, &'static str> {
-    let parts: Vec<&str> = buffer.trim().split(' ').collect();
+fn execute_statment(statement: Statement, table: &mut Table) -> Result<String, &'static str> {
+    match statement {
+        Statement::Insert(row) => {
+            let out = String::new();
+            table.insert_row(&row)?;
+            Ok(out)
+        }
+        Statement::Select => {
+            let mut out = String::new();
+            for row in table.select_row() {
+                out += format!("{:?}\n", row).as_str();
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn parse_statement(line: String) -> Result<Statement, &'static str> {
+    let parts: Vec<&str> = line.trim().split(' ').collect();
 
     match parts.as_slice() {
         ["insert", rest @ ..] => parse_insert(rest),
@@ -155,25 +173,21 @@ fn prepare_statment(buffer: String) -> Result<Statement, &'static str> {
     }
 }
 
-fn execute_statment(statement: Statement, table: &mut Table) -> Result<(), &'static str> {
-    match statement {
-        Statement::Insert(row) => {
-            table.insert_row(&row);
-            Ok(())
-        }
-        Statement::Select => {
-            for row in table.select_row() {
-                println!("{:?}", row);
-            }
-            Ok(())
-        }
-    }
-}
+// find a way to just put the strings in the command enum and match on the underlying
+// strum?
 
-fn parse_statement(line: String, table: &mut Table) -> Result<(), &'static str> {
-    match prepare_statment(line) {
-        Ok(statement) => execute_statment(statement, table),
-        Err(err) => Err(err),
+#[derive(Debug, PartialEq)]
+enum Command {
+    Help,
+    Exit,
+}
+const EXIT_COMMAND: &str = ".exit";
+const HELP_COMMAND: &str = ".help";
+
+fn execute_command(command: Command) {
+    match command {
+        Command::Help => print_help(),
+        Command::Exit => exit(),
     }
 }
 
@@ -181,25 +195,15 @@ fn print_help() {
     println!("help");
 }
 
-const EXIT_COMMAND: &str = ".exit";
-const HELP_COMMAND: &str = ".help";
-
-fn parse_command(line: String) -> Result<(), &'static str> {
-    match line.trim() {
-        EXIT_COMMAND => Ok(()),
-        HELP_COMMAND => {
-            print_help();
-            Ok(())
-        }
-        _ => Err("unknown command"),
-    }
+fn exit() {
+    std::process::exit(0)
 }
 
-fn parse_line(line: String, table: &mut Table) -> Result<(), &'static str> {
-    match line.chars().next() {
-        Some('.') => parse_command(line),
-        Some(_) => parse_statement(line, table),
-        None => Ok(println!("error")),
+fn parse_command(line: String) -> Result<Command, &'static str> {
+    match line.trim() {
+        EXIT_COMMAND => Ok(Command::Exit),
+        HELP_COMMAND => Ok(Command::Help),
+        _ => Err("unknown command"),
     }
 }
 
@@ -224,9 +228,21 @@ fn main() -> rustyline::Result<()> {
                 if rl.add_history_entry(line.as_str()).is_ok() {
                     rl.save_history(hist_file).unwrap();
                 }
-
-                if let Err(err) = parse_line(line, &mut table) {
-                    println!("{}", err);
+                match line.chars().next() {
+                    Some('.') => {
+                        let command = parse_command(line).unwrap();
+                        execute_command(command);
+                    }
+                    Some(_) => {
+                        let statement = parse_statement(line).unwrap();
+                        match execute_statment(statement, &mut table) {
+                            Ok(out) => println!("{}", out),
+                            Err(err) => println!("Error: {}", err),
+                        };
+                    }
+                    None => {
+                        println!("empty line");
+                    }
                 }
             }
             Err(ReadlineError::Interrupted) => {
@@ -254,7 +270,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn basic_rows() {
+    fn commands() {
+        assert_eq!(parse_command(String::from(".help")).unwrap(), Command::Help);
+        assert_eq!(parse_command(String::from(".exit")).unwrap(), Command::Exit);
+        assert_eq!(
+            parse_command(String::from(".elxit")),
+            Err("unknown command")
+        );
+    }
+
+    #[test]
+    fn statement_select() {
+        assert_eq!(
+            parse_statement(String::from("select")).unwrap(),
+            Statement::Select
+        );
+    }
+
+    #[test]
+    fn statement_insert() {
+        assert_eq!(
+            parse_statement(String::from("insert 1 abc def")).unwrap(),
+            Statement::Insert(Row::new(1, "abc", "def"))
+        );
+        assert_eq!(
+            parse_statement(String::from("insert")),
+            Err("invalid insert expected 3 args")
+        );
+        assert_eq!(
+            parse_statement(String::from("insert a abc def")),
+            Err("invalid id. not a number")
+        );
+    }
+
+    #[test]
+    fn rows() {
         let row = Row::new(1, "foo", "bar");
         assert_eq!(row.id, 1);
         assert_eq!(row.username, pad_string("foo", COLUMN_USERNAME_SIZE));
@@ -262,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn basic() {
+    fn table() {
         let mut table = Table::new();
         let _ = table.insert_row(&Row::new(1, "foo", "bar"));
         let _ = table.insert_row(&Row::new(2, "foo", "bar"));
