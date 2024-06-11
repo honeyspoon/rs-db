@@ -10,7 +10,7 @@ const TABLE_MAX_PAGES: usize = 100;
 const PAGE_SIZE: usize = 4096;
 
 struct Table {
-    nb_rows: u32,
+    nb_rows: usize,
     pages: Vec<Option<Page>>,
     row_size: usize,
 }
@@ -27,26 +27,42 @@ impl Table {
     }
 
     fn ensure_page_exists(&mut self, page_id: usize) {
-        let rows_per_page: usize = PAGE_SIZE / self.row_size;
         if self.pages[page_id].is_none() {
-            let capacity = rows_per_page * self.row_size;
+            let capacity = self.get_row_per_page() * self.row_size;
             self.pages[page_id] = Some(vec![0; capacity]);
         }
     }
 
-    fn get_page_id(&self, row_id: u32) -> usize {
-        row_id as usize / TABLE_MAX_PAGES
+    fn get_row_per_page(&self) -> usize {
+        PAGE_SIZE / self.row_size
     }
 
-    fn get_row_offset(&self, row_id: u32) -> usize {
-        (row_id as usize % TABLE_MAX_PAGES) * self.row_size
+    fn get_page_id(&self, row_id: usize) -> usize {
+        row_id / self.get_row_per_page()
+    }
+
+    fn get_row_offset(&self, row_id: usize) -> usize {
+        (row_id % self.get_row_per_page()) * self.row_size
+    }
+
+    fn is_full(&self) -> bool {
+        let max = self.get_row_per_page() * TABLE_MAX_PAGES;
+        self.nb_rows == max
     }
 
     fn insert_row(&mut self, row: &Row) -> Result<(), &'static str> {
-        let row_offset = self.get_row_offset(row.id);
+        if self.is_full() {
+            return Err("Table is full");
+        }
+
         match bincode::serialize(&row) {
             Ok(row_bytes) => {
-                let page_id = self.get_page_id(row.id);
+                let row_offset = self.get_row_offset(row.id as usize);
+                let page_id = self.get_page_id(row.id as usize);
+                println!(
+                    "row id: {}, page_id: {}, row_offset: {}",
+                    row.id, page_id, row_offset
+                );
                 self.ensure_page_exists(page_id);
 
                 match self.copy_to_page(page_id, row_offset, &row_bytes) {
@@ -304,6 +320,21 @@ mod tests {
     }
 
     #[test]
+    fn insert_truncate() {
+        let username: String = "0123456789123456789012345678901234".to_string();
+        let email: String = (0..COLUMN_EMAIL_SIZE + 4).map(|_| "X").collect::<String>();
+        let query = format!("insert 1 {} {}", username, email);
+        let Statement::Insert(row) = parse_statement(query).unwrap() else {
+            todo!()
+        };
+        assert_eq!(row, Row::new(1, username.as_str(), email.as_str()));
+        assert_ne!(row.username.len(), username.len());
+        assert_eq!(row.username.len(), COLUMN_USERNAME_SIZE);
+        assert_ne!(row.email.len(), email.len());
+        assert_eq!(row.email.len(), COLUMN_EMAIL_SIZE);
+    }
+
+    #[test]
     fn rows() {
         let row = Row::new(1, "foo", "bar");
         assert_eq!(row.id, 1);
@@ -318,5 +349,18 @@ mod tests {
         let _ = table.insert_row(&Row::new(2, "foo", "bar"));
         let rows = table.select_row();
         assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn fill_table() {
+        let mut table = Table::new();
+        let page_capacity = (PAGE_SIZE / table.row_size) as u32;
+        let max = page_capacity * TABLE_MAX_PAGES as u32;
+        for i in 0..max {
+            let res = table.insert_row(&Row::new(i, "foo", "bar"));
+            assert!(res.is_ok());
+        }
+        let res = table.insert_row(&Row::new(max + 1, "foo", "bar"));
+        assert_eq!(res, Err("Table is full"));
     }
 }
