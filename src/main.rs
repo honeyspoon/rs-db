@@ -82,7 +82,7 @@ impl Pager {
             let mut data = [0x0; PAGE_SIZE];
             if page_id + 1 < num_pages {
                 // + 1 because pages are indexed from 0
-                let offset = page_id as u64 * PAGE_SIZE as u64;
+                let offset = page_id as u64 * PAGE_SIZE as u64; // TODO:: cov
                 let _ = self.file.seek(SeekFrom::Start(offset));
                 if self.file.read(&mut data).is_err() {
                     return Err("Failed to read file");
@@ -163,7 +163,7 @@ impl Table {
                         self.nb_rows += 1;
                         Ok(())
                     }
-                    Err(_) => Err("failed to copy to page"),
+                    Err(_) => Err("failed to copy to page"), // TODO: cov
                 }
             }
             Err(_) => Err("failed to serialize row"),
@@ -241,12 +241,12 @@ fn parse_insert(words: &[&str]) -> Result<Statement, &'static str> {
 fn execute_statment(statement: Statement, table: &mut Table) -> Result<String, &'static str> {
     match statement {
         Statement::Insert(row) => {
-            let out = String::new();
+            let out = String::new(); // TODO: cov
             table.insert_row(&row)?;
             Ok(out)
         }
         Statement::Select => {
-            let mut out = String::new();
+            let mut out = String::new(); // TODO: cov
             for row in table.select_row() {
                 out += format!("{:?}\n", row).as_str();
             }
@@ -261,7 +261,7 @@ fn parse_statement(line: String) -> Result<Statement, &'static str> {
     match parts.as_slice() {
         ["insert", rest @ ..] => parse_insert(rest),
         ["select"] => Ok(Statement::Select),
-        _ => Err("unknown command"),
+        _ => Err("unknown command"), // TODO: cov
     }
 }
 
@@ -278,8 +278,8 @@ const HELP_COMMAND: &str = ".help";
 
 fn execute_command(command: Command) {
     match command {
-        Command::Help => print_help(),
-        Command::Exit => exit(),
+        Command::Help => print_help(), // TODO: cov
+        Command::Exit => exit(),       // TODO: cov
     }
 }
 
@@ -288,7 +288,7 @@ fn print_help() {
 }
 
 fn exit() {
-    std::process::exit(0)
+    // TODO: cov std::process::exit(0)
 }
 
 fn parse_command(line: String) -> Result<Command, &'static str> {
@@ -300,7 +300,7 @@ fn parse_command(line: String) -> Result<Command, &'static str> {
 }
 
 fn main() -> rustyline::Result<()> {
-    env_logger::init();
+    env_logger::init(); // TODO: cov
 
     let mut rl = DefaultEditor::new()?;
     println!("~ rsdb");
