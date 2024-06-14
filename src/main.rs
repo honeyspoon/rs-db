@@ -1,35 +1,132 @@
-use log::info;
+use std::cmp::max;
 use std::fmt;
+use std::fs::OpenOptions;
+use std::io::{Read, Seek, SeekFrom, Write};
 
-use serde::{Deserialize, Serialize};
+use log::info;
 
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use serde::{Deserialize, Serialize};
 
 const TABLE_MAX_PAGES: usize = 100;
 const PAGE_SIZE: usize = 4096;
 
-struct Table {
-    nb_rows: usize,
+#[derive(Clone)]
+struct Page {
+    bytes: [u8; PAGE_SIZE],
+    end_offset: usize,
+}
+
+impl Page {
+    fn new(data: [u8; PAGE_SIZE]) -> Self {
+        Self {
+            bytes: data,
+            end_offset: 0,
+        }
+    }
+
+    fn write(&mut self, offset: usize, data: &[u8]) -> Result<(), &'static str> {
+        if data.len() + offset > PAGE_SIZE {
+            Err("not enough space to write")
+        } else {
+            self.bytes[offset..offset + data.len()].copy_from_slice(data);
+            self.end_offset = max(offset + data.len(), self.end_offset);
+            Ok(())
+        }
+    }
+}
+
+trait RW: Read + Write + Seek {}
+impl<T: Read + Write + Seek> RW for T {}
+
+struct Pager {
+    file: Box<dyn RW>,
+    file_size: usize,
     pages: Vec<Option<Page>>,
+}
+
+impl Pager {
+    fn new(mut file: Box<dyn RW>) -> Self {
+        let file_size = file.seek(SeekFrom::End(0)).unwrap() as usize;
+        file.seek(SeekFrom::Start(0)).unwrap();
+        Self {
+            file,
+            file_size,
+            pages: vec![None; TABLE_MAX_PAGES],
+        }
+    }
+
+    fn flush(&mut self, page_id: usize) {
+        let offset = (PAGE_SIZE * page_id) as u64;
+
+        if let Some(page) = self.pages[page_id].as_mut() {
+            let _ = self.file.seek(SeekFrom::Start(offset));
+            let _ = self.file.write(&page.bytes[0..page.end_offset]);
+        }
+    }
+
+    fn get_nb_pages(&self) -> (usize, usize) {
+        let mut num_pages = self.file_size / PAGE_SIZE;
+        let rest = self.file_size % PAGE_SIZE;
+        if rest != 0 {
+            num_pages += 1;
+        }
+        (num_pages, rest)
+    }
+
+    fn load_page(&mut self, page_id: usize) -> Result<&mut Page, &'static str> {
+        let (num_pages, _) = self.get_nb_pages();
+
+        if self.pages[page_id].is_none() {
+            let mut data = [0x0; PAGE_SIZE];
+            if page_id + 1 < num_pages {
+                // + 1 because pages are indexed from 0
+                let offset = page_id as u64 * PAGE_SIZE as u64;
+                let _ = self.file.seek(SeekFrom::Start(offset));
+                if self.file.read(&mut data).is_err() {
+                    return Err("Failed to read file");
+                }
+            }
+
+            self.pages[page_id] = Some(Page::new(data));
+        }
+
+        Ok((self.pages[page_id]).as_mut().unwrap())
+    }
+}
+
+impl Drop for Pager {
+    fn drop(&mut self) {
+        for page_id in 0..self.pages.len() {
+            self.flush(page_id);
+        }
+    }
+}
+
+struct Table {
+    pager: Pager,
+    nb_rows: usize,
     row_size: usize,
 }
 
 impl Table {
-    fn new() -> Self {
+    fn new(pager: Pager) -> Self {
         let row_size = bincode::serialized_size(&Row::new(0, "", "")).unwrap() as usize;
+        let rows_per_page = PAGE_SIZE / row_size;
+
+        // the assumption here is that every page expect the last one if full
+        // and that the last unfilled page will ocitian full rows
+
+        let (nb_pages, rest) = pager.get_nb_pages();
+        let full_pages = max(nb_pages, 1) - 1;
+        let rows = full_pages * rows_per_page;
+        let nb_rows = (rows + rest) / row_size;
 
         Self {
-            nb_rows: 0,
-            pages: vec![None; TABLE_MAX_PAGES],
+            nb_rows,
+            pager,
             row_size,
-        }
-    }
-
-    fn ensure_page_exists(&mut self, page_id: usize) {
-        if self.pages[page_id].is_none() {
-            let capacity = self.get_row_per_page() * self.row_size;
-            self.pages[page_id] = Some(vec![0; capacity]);
         }
     }
 
@@ -57,15 +154,11 @@ impl Table {
 
         match bincode::serialize(&row) {
             Ok(row_bytes) => {
-                let row_offset = self.get_row_offset(row.id as usize);
                 let page_id = self.get_page_id(row.id as usize);
-                println!(
-                    "row id: {}, page_id: {}, row_offset: {}",
-                    row.id, page_id, row_offset
-                );
-                self.ensure_page_exists(page_id);
+                let offset = self.get_row_offset(row.id as usize);
+                let page: &mut Page = self.pager.load_page(page_id)?;
 
-                match self.copy_to_page(page_id, row_offset, &row_bytes) {
+                match page.write(offset, &row_bytes) {
                     Ok(_) => {
                         self.nb_rows += 1;
                         Ok(())
@@ -77,35 +170,18 @@ impl Table {
         }
     }
 
-    fn copy_to_page(
-        &mut self,
-        page_id: usize,
-        row_offset: usize,
-        row_bytes: &[u8],
-    ) -> Result<(), &'static str> {
-        match self.pages[page_id].as_mut() {
-            Some(page) => {
-                page[row_offset..row_offset + row_bytes.len()].copy_from_slice(row_bytes);
-                Ok(())
-            }
-            None => Err("failed to get page"),
-        }
-    }
-
-    fn select_row(&self) -> Vec<Row> {
+    fn select_row(&mut self) -> Vec<Row> {
         (0..self.nb_rows)
             .map(|row_id| {
                 let page_id = self.get_page_id(row_id);
-                let page = self.pages[page_id].as_ref().unwrap();
                 let row_offset = self.get_row_offset(row_id);
-                let slice = &page[row_offset..row_offset + self.row_size];
+                let page = self.pager.load_page(page_id).unwrap();
+                let slice = &page.bytes[row_offset..row_offset + self.row_size];
                 bincode::deserialize(slice).unwrap()
             })
             .collect()
     }
 }
-
-type Page = Vec<u8>;
 
 #[derive(Serialize, Deserialize, PartialEq)]
 struct Row {
@@ -234,7 +310,16 @@ fn main() -> rustyline::Result<()> {
         println!("No previous history.");
     }
 
-    let mut table = Table::new();
+    let filename = "c.db".to_string();
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(filename)
+        .unwrap();
+    let pager = Pager::new(Box::new(file));
+    let mut table = Table::new(pager);
 
     loop {
         let readline = rl.readline("> ");
@@ -245,17 +330,17 @@ fn main() -> rustyline::Result<()> {
                     rl.save_history(hist_file).unwrap();
                 }
                 match line.chars().next() {
-                    Some('.') => {
-                        let command = parse_command(line).unwrap();
-                        execute_command(command);
-                    }
-                    Some(_) => {
-                        let statement = parse_statement(line).unwrap();
-                        match execute_statment(statement, &mut table) {
+                    Some('.') => match parse_command(line) {
+                        Ok(command) => execute_command(command),
+                        Err(err) => println!("Error: {}", err),
+                    },
+                    Some(_) => match parse_statement(line) {
+                        Ok(statement) => match execute_statment(statement, &mut table) {
                             Ok(out) => println!("{}", out),
                             Err(err) => println!("Error: {}", err),
-                        };
-                    }
+                        },
+                        Err(err) => println!("Error: {}", err),
+                    },
                     None => {
                         println!("empty line");
                     }
@@ -284,6 +369,7 @@ fn main() -> rustyline::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempfile;
 
     #[test]
     fn commands() {
@@ -321,8 +407,8 @@ mod tests {
 
     #[test]
     fn insert_truncate() {
-        let username: String = "0123456789123456789012345678901234".to_string();
-        let email: String = (0..COLUMN_EMAIL_SIZE + 4).map(|_| "X").collect::<String>();
+        let username = "0123456789123456789012345678901234".to_string();
+        let email = (0..COLUMN_EMAIL_SIZE + 4).map(|_| "X").collect::<String>();
         let query = format!("insert 1 {} {}", username, email);
         let Statement::Insert(row) = parse_statement(query).unwrap() else {
             todo!()
@@ -343,8 +429,37 @@ mod tests {
     }
 
     #[test]
+    fn page() {
+        let mut page = Page::new([0x0; PAGE_SIZE]);
+        assert_eq!(
+            page.write(PAGE_SIZE, &[0x1]),
+            Err("not enough space to write")
+        );
+
+        assert_eq!(page.bytes.len(), PAGE_SIZE);
+        assert_eq!(page.end_offset, 0);
+        assert_eq!(page.write(100, &[0x1; 10]), Ok(()));
+        assert_eq!(page.end_offset, 110);
+    }
+
+    #[test]
+    fn pager() {
+        let data: Vec<u8> = vec![0x0; PAGE_SIZE];
+        let cursor = Box::new(std::io::Cursor::new(data)) as Box<dyn RW>;
+        let pager = Pager::new(Box::new(cursor));
+        assert_eq!(pager.get_nb_pages(), (1, 0));
+
+        let data: Vec<u8> = vec![0x0; PAGE_SIZE + 7];
+        let cursor = Box::new(std::io::Cursor::new(data)) as Box<dyn RW>;
+        let pager = Pager::new(Box::new(cursor));
+        assert_eq!(pager.get_nb_pages(), (2, 7));
+    }
+
+    #[test]
     fn table() {
-        let mut table = Table::new();
+        let data: Vec<u8> = vec![0x0; PAGE_SIZE];
+        let cursor = Box::new(std::io::Cursor::new(data)) as Box<dyn RW>;
+        let mut table = Table::new(Pager::new(cursor));
         let _ = table.insert_row(&Row::new(1, "foo", "bar"));
         let _ = table.insert_row(&Row::new(2, "foo", "bar"));
         let rows = table.select_row();
@@ -353,14 +468,63 @@ mod tests {
 
     #[test]
     fn fill_table() {
-        let mut table = Table::new();
-        let page_capacity = (PAGE_SIZE / table.row_size) as u32;
-        let max = page_capacity * TABLE_MAX_PAGES as u32;
+        let data: Vec<u8> = vec![0x0; PAGE_SIZE];
+        let cursor = Box::new(std::io::Cursor::new(data)) as Box<dyn RW>;
+        let mut table = Table::new(Pager::new(cursor));
+        let max = (table.get_row_per_page() * TABLE_MAX_PAGES) as u32;
         for i in 0..max {
             let res = table.insert_row(&Row::new(i, "foo", "bar"));
             assert!(res.is_ok());
         }
-        let res = table.insert_row(&Row::new(max + 1, "foo", "bar"));
+        let res = table.insert_row(&Row::new(max, "foo", "bar"));
         assert_eq!(res, Err("Table is full"));
+    }
+
+    #[test]
+    fn persistance() {
+        let tempfile = tempfile().expect("Failed to create tempfile");
+        {
+            let mut table = Table::new(Pager::new(Box::new(
+                tempfile.try_clone().expect("Failed to clone tempfile"),
+            )));
+
+            let rows = table.select_row();
+            assert_eq!(rows.len(), 0);
+
+            let _ = table.insert_row(&Row::new(0, "foo", "bar"));
+            let rows = table.select_row();
+            assert_eq!(rows.len(), 1);
+            drop(table);
+        }
+        {
+            let mut table = Table::new(Pager::new(Box::new(
+                tempfile.try_clone().expect("Failed to clone tempfile"),
+            )));
+
+            let rows = table.select_row();
+            assert_eq!(rows.len(), 1);
+        }
+    }
+
+    #[test]
+    fn all() {
+        let filename = "/tmp/c.db".to_string();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(filename)
+            .unwrap();
+
+        let pager = Pager::new(Box::new(file));
+        let mut table = Table::new(pager);
+        table.insert_row(&Row::new(0, "foo", "bar")).unwrap();
+        table.insert_row(&Row::new(1, "foo", "bar")).unwrap();
+        table.insert_row(&Row::new(2, "foo", "bar")).unwrap();
+        let rows = table.select_row();
+        for row in rows {
+            println!("s - {:?}", row);
+        }
     }
 }
